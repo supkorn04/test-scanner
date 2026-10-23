@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Barcode & QR Scanner</title>
+  <title>Barcode Scanner with Reset</title>
   <script src="https://unpkg.com/@zxing/library@latest"></script>
   <style>
     * { box-sizing: border-box; }
@@ -11,128 +11,300 @@
       font-family: system-ui, -apple-system, sans-serif;
       text-align: center;
       margin: 0;
-      padding: 1.5rem;
-      background: #f8fafc;
-      color: #1e293b;
+      padding: 1rem;
+      background: #0f172a;
+      color: #f8fafc;
     }
-    .scanner-container {
+    .scanner-wrapper {
       position: relative;
-      max-width: 480px;
+      max-width: 420px;
       margin: 1rem auto;
-      border-radius: 12px;
+      border-radius: 14px;
       overflow: hidden;
       background: #000;
+      border: 2px solid #334155;
     }
     video {
       width: 100%;
-      height: 320px;
+      height: 340px;
       object-fit: cover;
       display: block;
     }
-    /* Visual viewfinder guide */
-    .overlay {
+    .scan-line {
       position: absolute;
       top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 70%;
-      height: 45%;
-      border: 2px dashed rgba(255, 255, 255, 0.8);
-      border-radius: 8px;
-      pointer-events: none;
+      left: 10%;
+      width: 80%;
+      height: 2px;
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+      transition: opacity 0.3s;
     }
-    .card {
-      max-width: 480px;
-      margin: 1rem auto;
-      padding: 1rem;
-      background: #fff;
-      border-radius: 10px;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-      text-align: left;
-    }
-    .result-value {
-      font-size: 1.25rem;
-      font-weight: 700;
-      color: #0284c7;
-      word-break: break-all;
+    .controls {
+      max-width: 420px;
+      margin: 0.5rem auto;
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      align-items: center;
     }
     button {
-      padding: 10px 24px;
-      font-size: 1rem;
+      padding: 10px 18px;
+      font-size: 0.95rem;
       font-weight: 600;
       color: #fff;
-      background: #0284c7;
+      background: #2563eb;
       border: none;
       border-radius: 8px;
       cursor: pointer;
     }
-    button:active { background: #0369a1; }
+    button:disabled {
+      background: #475569;
+      cursor: not-allowed;
+    }
+    #reset-btn {
+      background: #059669;
+    }
+    .zoom-slider {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      margin: 8px auto;
+      max-width: 420px;
+      color: #94a3b8;
+      font-size: 0.85rem;
+    }
+    .card {
+      max-width: 420px;
+      margin: 1rem auto;
+      padding: 1rem;
+      background: #1e293b;
+      border-radius: 10px;
+      text-align: left;
+    }
+    .result-text {
+      font-size: 1.25rem;
+      font-weight: bold;
+      color: #38bdf8;
+      word-break: break-all;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      border-radius: 4px;
+      background: #334155;
+      margin-bottom: 6px;
+    }
   </style>
 </head>
 <body>
 
-  <h2>Scan Barcode & QR Code</h2>
-  <button id="toggle-btn">Start Camera</button>
+  <h3>Barcode & QR Scanner</h3>
+  
+  <div class="controls">
+    <button id="toggle-btn">Start Camera</button>
+    <button id="reset-btn" disabled>Scan Again</button>
+    <button id="zoom-2x" style="display: none; background: #475569;">2x</button>
+  </div>
 
-  <div class="scanner-container">
+  <div class="scanner-wrapper">
     <video id="video" autoplay playsinline muted></video>
-    <div class="overlay"></div>
+    <div class="scan-line" id="scan-line"></div>
+  </div>
+
+  <div class="zoom-slider" id="zoom-container">
+    <span>Zoom:</span>
+    <input type="range" id="zoom-range" min="1" max="5" step="0.1" value="1" style="flex: 1;">
+    <span id="zoom-val">1x</span>
   </div>
 
   <div class="card">
+    <span class="status-badge" id="scanner-status">Status: Idle</span>
     <div><strong>Scanned Data:</strong></div>
-    <div class="result-value" id="result-text">Waiting to scan...</div>
-    <div style="margin-top: 0.5rem; color: #64748b; font-size: 0.9rem;">
-      Format: <span id="result-format">-</span>
+    <div class="result-text" id="result-text">Waiting to scan...</div>
+    <div style="margin-top: 6px; font-size: 0.85rem; color: #94a3b8;">
+      Format: <span id="result-format">-</span> | Engine: <span id="scan-engine">-</span>
     </div>
   </div>
 
   <script>
-    const codeReader = new ZXing.BrowserMultiFormatReader();
-    const videoElem = document.getElementById('video');
+    const video = document.getElementById('video');
+    const toggleBtn = document.getElementById('toggle-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    const zoom2xBtn = document.getElementById('zoom-2x');
+    const zoomContainer = document.getElementById('zoom-container');
+    const zoomRange = document.getElementById('zoom-range');
+    const zoomVal = document.getElementById('zoom-val');
     const resultText = document.getElementById('result-text');
     const resultFormat = document.getElementById('result-format');
-    const toggleBtn = document.getElementById('toggle-btn');
-    let isScanning = false;
+    const scanEngine = document.getElementById('scan-engine');
+    const scannerStatus = document.getElementById('scanner-status');
+    const scanLine = document.getElementById('scan-line');
+
+    let stream = null;
+    let track = null;
+    let scanning = false;
+    let isPaused = false; // Prevents spamming and lets user scan repeatedly
+    let detector = null;
+    let resetTimer = null;
+
+    const hasNativeBarcode = 'BarcodeDetector' in window;
+    if (hasNativeBarcode) {
+      detector = new BarcodeDetector({
+        formats: ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e']
+      });
+      scanEngine.textContent = 'Hardware Native';
+    } else {
+      scanEngine.textContent = 'ZXing Fallback';
+    }
 
     toggleBtn.addEventListener('click', async () => {
-      if (isScanning) {
-        codeReader.reset();
-        isScanning = false;
-        toggleBtn.textContent = 'Start Camera';
-        return;
-      }
-
-      try {
-        isScanning = true;
-        toggleBtn.textContent = 'Stop Camera';
-
-        // ZXing scans 1D (UPC/EAN/Code 128) and 2D (QR) simultaneously
-        await codeReader.decodeFromConstraints(
-          {
-            video: {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-            }
-          },
-          'video',
-          (result, err) => {
-            if (result) {
-              resultText.textContent = result.getText();
-              resultFormat.textContent = result.getBarcodeFormat();
-              
-              // Optional: short vibration feedback on mobile
-              if (navigator.vibrate) navigator.vibrate(100);
-            }
-          }
-        );
-      } catch (err) {
-        alert('Could not start camera: ' + err.message);
-        isScanning = false;
-        toggleBtn.textContent = 'Start Camera';
+      if (scanning) {
+        stopCamera();
+      } else {
+        startCamera();
       }
     });
+
+    // Manual Reset Button
+    resetBtn.addEventListener('click', () => {
+      resumeScanning();
+    });
+
+    function setScannerPaused(paused) {
+      isPaused = paused;
+      if (paused) {
+        scannerStatus.textContent = 'Status: Scanned! (Ready in 2s)';
+        scannerStatus.style.background = '#059669';
+        scanLine.style.opacity = '0.2';
+        resetBtn.disabled = false;
+      } else {
+        scannerStatus.textContent = 'Status: Scanning...';
+        scannerStatus.style.background = '#2563eb';
+        scanLine.style.opacity = '1';
+        resetBtn.disabled = true;
+      }
+    }
+
+    function resumeScanning() {
+      if (resetTimer) clearTimeout(resetTimer);
+      setScannerPaused(false);
+    }
+
+    function onCodeDetected(value, format) {
+      if (isPaused) return;
+
+      // Pause to prevent repeated multi-triggers
+      setScannerPaused(true);
+
+      resultText.textContent = value;
+      resultFormat.textContent = format;
+
+      if (navigator.vibrate) navigator.vibrate(100);
+
+      // Auto-unlock after 2.5 seconds so you can scan the next item
+      resetTimer = setTimeout(() => {
+        resumeScanning();
+      }, 2500);
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            focusMode: { ideal: 'continuous' }
+          }
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        track = stream.getVideoTracks()[0];
+        setupHardwareZoom(track);
+
+        scanning = true;
+        setScannerPaused(false);
+        toggleBtn.textContent = 'Stop Camera';
+        toggleBtn.style.background = '#dc2626';
+
+        if (hasNativeBarcode) {
+          scanWithNative();
+        } else {
+          scanWithZXingFallback();
+        }
+      } catch (err) {
+        alert('Camera Error: ' + err.message);
+      }
+    }
+
+    function setupHardwareZoom(videoTrack) {
+      const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
+      if (capabilities.zoom) {
+        zoomContainer.style.display = 'flex';
+        zoom2xBtn.style.display = 'inline-block';
+        zoomRange.min = capabilities.zoom.min;
+        zoomRange.max = capabilities.zoom.max;
+        zoomRange.step = capabilities.zoom.step || 0.1;
+
+        zoomRange.oninput = () => applyZoom(parseFloat(zoomRange.value));
+        zoom2xBtn.onclick = () => {
+          const target = Math.min(2.0, capabilities.zoom.max);
+          zoomRange.value = target;
+          applyZoom(target);
+        };
+      }
+    }
+
+    function applyZoom(val) {
+      if (!track) return;
+      track.applyConstraints({ advanced: [{ zoom: val }] });
+      zoomVal.textContent = `${val.toFixed(1)}x`;
+    }
+
+    async function scanWithNative() {
+      if (!scanning) return;
+      if (!isPaused) {
+        try {
+          const barcodes = await detector.detect(video);
+          if (barcodes.length > 0) {
+            onCodeDetected(barcodes[0].rawValue, barcodes[0].format);
+          }
+        } catch (e) {
+          // ignore dropped frames
+        }
+      }
+      requestAnimationFrame(scanWithNative);
+    }
+
+    let zxingReader = null;
+    function scanWithZXingFallback() {
+      zxingReader = new ZXing.BrowserMultiFormatReader();
+      zxingReader.decodeFromVideoElement(video, (result) => {
+        if (result && scanning && !isPaused) {
+          onCodeDetected(result.getText(), result.getBarcodeFormat());
+        }
+      });
+    }
+
+    function stopCamera() {
+      scanning = false;
+      isPaused = false;
+      if (resetTimer) clearTimeout(resetTimer);
+      if (zxingReader) zxingReader.reset();
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+      toggleBtn.textContent = 'Start Camera';
+      toggleBtn.style.background = '#2563eb';
+      resetBtn.disabled = true;
+      scannerStatus.textContent = 'Status: Idle';
+      scannerStatus.style.background = '#334155';
+      zoomContainer.style.display = 'none';
+      zoom2xBtn.style.display = 'none';
+    }
   </script>
 </body>
 </html>
