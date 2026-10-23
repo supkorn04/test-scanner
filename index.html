@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Micro & Inverted QR Scanner</title>
-  <script src="https://unpkg.com/@zxing/library@latest"></script>
+  <title>Micro Inverted QR Scanner</title>
+  <!-- jsQR specializes in inverted / white-on-dark QR codes -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -22,47 +23,37 @@
       border-radius: 16px;
       overflow: hidden;
       background: #000;
-      border: 2px solid #334155;
+      border: 2px solid #38bdf8;
     }
     video {
       width: 100%;
-      height: 350px;
+      height: 380px;
       object-fit: cover;
       display: block;
     }
-    /* Small targeting box to isolate one of the two codes */
-    .viewfinder {
+    .target-box {
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      width: 140px;
-      height: 140px;
-      border: 2px solid #38bdf8;
+      width: 160px;
+      height: 160px;
+      border: 2px dashed #38bdf8;
       border-radius: 12px;
-      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
       pointer-events: none;
-    }
-    .viewfinder::before {
-      content: "Aim at ONE code";
-      position: absolute;
-      top: -24px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 0.72rem;
-      color: #38bdf8;
-      white-space: nowrap;
     }
     .controls {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       justify-content: center;
       margin: 0.8rem auto;
       max-width: 400px;
     }
     button {
-      padding: 10px 18px;
-      font-size: 0.95rem;
+      padding: 10px 16px;
+      font-size: 0.9rem;
       font-weight: 600;
       color: #fff;
       background: #2563eb;
@@ -80,85 +71,105 @@
       text-align: left;
     }
     .result-text {
-      font-size: 1.25rem;
+      font-size: 1.3rem;
       font-weight: bold;
       color: #38bdf8;
       word-break: break-all;
     }
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      font-size: 0.75rem;
-      border-radius: 4px;
-      background: #334155;
-      margin-bottom: 6px;
+    .tip-box {
+      margin: 0.5rem auto;
+      max-width: 400px;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      line-height: 1.4;
     }
   </style>
 </head>
 <body>
 
-  <h3>Precision QR & Barcode Scanner</h3>
+  <h3>Micro & Inverted Scanner</h3>
+
+  <div class="tip-box">
+    ⚠️ <strong>Do NOT hold camera too close.</strong> Keep phone 15–20 cm away and use 2x/3x zoom so the lens stays focused.
+  </div>
 
   <div class="controls">
     <button id="toggle-btn">Start Camera</button>
+    <button id="torch-btn" style="display:none; background:#d97706;">Flashlight</button>
     <button id="reset-btn" disabled style="background: #059669;">Scan Again</button>
   </div>
 
-  <div class="scanner-wrapper">
-    <video id="video" autoplay playsinline muted></video>
-    <div class="viewfinder"></div>
+  <div class="controls" id="zoom-controls" style="display: none;">
+    <button onclick="setZoom(1)">1x</button>
+    <button onclick="setZoom(2)">2x</button>
+    <button onclick="setZoom(3)">3x</button>
+    <button onclick="setZoom(4)">4x</button>
   </div>
 
-  <!-- Offscreen canvas used to invert and enhance frames -->
-  <canvas id="proc-canvas" style="display: none;"></canvas>
+  <div class="scanner-wrapper">
+    <video id="video" playsinline muted></video>
+    <div class="target-box"></div>
+  </div>
+
+  <!-- Offscreen canvas for raw pixel data -->
+  <canvas id="qr-canvas" style="display: none;"></canvas>
 
   <div class="card">
-    <span class="badge" id="status-badge">Status: Idle</span>
-    <div><strong>Decoded Value:</strong></div>
-    <div class="result-text" id="result-text">Waiting...</div>
-    <div style="margin-top: 6px; font-size: 0.85rem; color: #94a3b8;">
-      Mode: <span id="mode-text">Standard + Inverted Auto</span>
-    </div>
+    <div style="font-size: 0.8rem; color: #94a3b8;">DECODED OUTPUT:</div>
+    <div class="result-text" id="result-text">Waiting to scan...</div>
   </div>
 
   <script>
     const video = document.getElementById('video');
     const toggleBtn = document.getElementById('toggle-btn');
     const resetBtn = document.getElementById('reset-btn');
+    const torchBtn = document.getElementById('torch-btn');
+    const zoomControls = document.getElementById('zoom-controls');
     const resultText = document.getElementById('result-text');
-    const statusBadge = document.getElementById('status-badge');
-    const canvas = document.getElementById('proc-canvas');
+    const canvas = document.getElementById('qr-canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
     let stream = null;
     let track = null;
     let scanning = false;
     let isPaused = false;
-    let frameToggle = false;
-    let detector = null;
-    let zxingReader = null;
-
-    if ('BarcodeDetector' in window) {
-      detector = new BarcodeDetector({ formats: ['qr_code', 'ean_13', 'code_128', 'data_matrix'] });
-    } else {
-      zxingReader = new ZXing.BrowserMultiFormatReader();
-    }
+    let torchOn = false;
 
     toggleBtn.addEventListener('click', () => {
       if (scanning) stopCamera();
       else startCamera();
     });
 
-    resetBtn.addEventListener('click', resumeScanning);
+    resetBtn.addEventListener('click', () => {
+      isPaused = false;
+      resetBtn.disabled = true;
+      resultText.textContent = "Scanning...";
+    });
+
+    torchBtn.addEventListener('click', async () => {
+      if (!track) return;
+      torchOn = !torchOn;
+      await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+      torchBtn.textContent = torchOn ? 'Flashlight OFF' : 'Flashlight ON';
+    });
+
+    async function setZoom(val) {
+      if (!track) return;
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.zoom) {
+        const target = Math.min(Math.max(val, caps.zoom.min), caps.zoom.max);
+        await track.applyConstraints({ advanced: [{ zoom: target }] });
+      }
+    }
 
     async function startCamera() {
       try {
+        // Enforce maximum available resolution so small codes have high pixel density
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
             width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            focusMode: { ideal: 'continuous' }
+            height: { ideal: 1080 }
           }
         });
 
@@ -166,93 +177,65 @@
         await video.play();
 
         track = stream.getVideoTracks()[0];
-        
-        // Auto-apply maximum optical/digital zoom supported (around 1.5x - 2x)
         const caps = track.getCapabilities ? track.getCapabilities() : {};
+
+        // Show zoom buttons if supported, and auto-zoom to 2.5x
         if (caps.zoom) {
-          const targetZoom = Math.min(2.0, caps.zoom.max);
-          await track.applyConstraints({ advanced: [{ zoom: targetZoom }] });
+          zoomControls.style.display = 'flex';
+          const initZoom = Math.min(2.5, caps.zoom.max);
+          await track.applyConstraints({ advanced: [{ zoom: initZoom }] });
+        }
+
+        // Show flashlight button if available
+        if (caps.torch) {
+          torchBtn.style.display = 'inline-block';
         }
 
         scanning = true;
         isPaused = false;
         toggleBtn.textContent = 'Stop Camera';
         toggleBtn.style.background = '#dc2626';
-        statusBadge.textContent = 'Status: Scanning...';
-        statusBadge.style.background = '#2563eb';
 
-        requestAnimationFrame(processFrame);
+        requestAnimationFrame(tick);
       } catch (err) {
         alert('Camera Error: ' + err.message);
       }
     }
 
-    async function processFrame() {
+    function tick() {
       if (!scanning) return;
 
       if (!isPaused && video.readyState === video.HAVE_ENOUGH_DATA) {
-        // Crop directly to center 40% where the reticle box is located
-        const cropW = video.videoWidth * 0.4;
-        const cropH = video.videoWidth * 0.4;
-        const cropX = (video.videoWidth - cropW) / 2;
-        const cropY = (video.videoHeight - cropH) / 2;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-        canvas.width = cropW;
-        canvas.height = cropH;
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-        // Alternate passes: Frame A = Normal, Frame B = Inverted + High Contrast
-        frameToggle = !frameToggle;
-        if (frameToggle) {
-          ctx.filter = 'none';
-        } else {
-          // This inverts white-on-black into black-on-white and sharpens lines
-          ctx.filter = 'invert(100%) contrast(150%)';
-        }
+        // jsQR natively checks both black-on-white and white-on-black (inverted)
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: "attemptBoth"
+        });
 
-        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-
-        try {
-          if (detector) {
-            const barcodes = await detector.detect(canvas);
-            if (barcodes.length > 0) {
-              handleSuccess(barcodes[0].rawValue);
-            }
-          } else if (zxingReader) {
-            // ZXing canvas decode
-            const imgData = ctx.getImageData(0, 0, cropW, cropH);
-            // ZXing software fallback
-            const luminanceSource = new ZXing.RGBLuminanceSource(imgData.data, cropW, cropH);
-            const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
-            const result = new ZXing.MultiFormatReader().decode(binaryBitmap);
-            if (result) handleSuccess(result.getText());
-          }
-        } catch (e) {
-          // No barcode detected in this specific frame
+        if (code && code.data) {
+          handleSuccess(code.data);
         }
       }
 
-      requestAnimationFrame(processFrame);
+      requestAnimationFrame(tick);
     }
 
-    function handleSuccess(val) {
+    function handleSuccess(data) {
       isPaused = true;
-      resultText.textContent = val;
-      statusBadge.textContent = 'Status: Scanned!';
-      statusBadge.style.background = '#059669';
+      resultText.textContent = data;
       resetBtn.disabled = false;
-      if (navigator.vibrate) navigator.vibrate(120);
+      if (navigator.vibrate) navigator.vibrate(100);
 
       // Auto-unlock after 3 seconds
       setTimeout(() => {
-        resumeScanning();
+        isPaused = false;
+        resetBtn.disabled = true;
       }, 3000);
-    }
-
-    function resumeScanning() {
-      isPaused = false;
-      resetBtn.disabled = true;
-      statusBadge.textContent = 'Status: Scanning...';
-      statusBadge.style.background = '#2563eb';
     }
 
     function stopCamera() {
@@ -261,9 +244,9 @@
       video.srcObject = null;
       toggleBtn.textContent = 'Start Camera';
       toggleBtn.style.background = '#2563eb';
+      zoomControls.style.display = 'none';
+      torchBtn.style.display = 'none';
       resetBtn.disabled = true;
-      statusBadge.textContent = 'Status: Idle';
-      statusBadge.style.background = '#334155';
     }
   </script>
 </body>
