@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Barcode Scanner with Reset</title>
+  <title>Micro & Inverted QR Scanner</title>
   <script src="https://unpkg.com/@zxing/library@latest"></script>
   <style>
     * { box-sizing: border-box; }
@@ -12,41 +12,53 @@
       text-align: center;
       margin: 0;
       padding: 1rem;
-      background: #0f172a;
+      background: #090d16;
       color: #f8fafc;
     }
     .scanner-wrapper {
       position: relative;
-      max-width: 420px;
+      max-width: 400px;
       margin: 1rem auto;
-      border-radius: 14px;
+      border-radius: 16px;
       overflow: hidden;
       background: #000;
       border: 2px solid #334155;
     }
     video {
       width: 100%;
-      height: 340px;
+      height: 350px;
       object-fit: cover;
       display: block;
     }
-    .scan-line {
+    /* Small targeting box to isolate one of the two codes */
+    .viewfinder {
       position: absolute;
       top: 50%;
-      left: 10%;
-      width: 80%;
-      height: 2px;
-      background: #ef4444;
-      box-shadow: 0 0 8px #ef4444;
-      transition: opacity 0.3s;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 140px;
+      height: 140px;
+      border: 2px solid #38bdf8;
+      border-radius: 12px;
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+      pointer-events: none;
+    }
+    .viewfinder::before {
+      content: "Aim at ONE code";
+      position: absolute;
+      top: -24px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.72rem;
+      color: #38bdf8;
+      white-space: nowrap;
     }
     .controls {
-      max-width: 420px;
-      margin: 0.5rem auto;
       display: flex;
       gap: 8px;
       justify-content: center;
-      align-items: center;
+      margin: 0.8rem auto;
+      max-width: 400px;
     }
     button {
       padding: 10px 18px;
@@ -58,28 +70,13 @@
       border-radius: 8px;
       cursor: pointer;
     }
-    button:disabled {
-      background: #475569;
-      cursor: not-allowed;
-    }
-    #reset-btn {
-      background: #059669;
-    }
-    .zoom-slider {
-      display: none;
-      align-items: center;
-      gap: 6px;
-      margin: 8px auto;
-      max-width: 420px;
-      color: #94a3b8;
-      font-size: 0.85rem;
-    }
+    button:disabled { background: #475569; }
     .card {
-      max-width: 420px;
+      max-width: 400px;
       margin: 1rem auto;
       padding: 1rem;
       background: #1e293b;
-      border-radius: 10px;
+      border-radius: 12px;
       text-align: left;
     }
     .result-text {
@@ -88,7 +85,7 @@
       color: #38bdf8;
       word-break: break-all;
     }
-    .status-badge {
+    .badge {
       display: inline-block;
       padding: 2px 8px;
       font-size: 0.75rem;
@@ -100,31 +97,27 @@
 </head>
 <body>
 
-  <h3>Barcode & QR Scanner</h3>
-  
+  <h3>Precision QR & Barcode Scanner</h3>
+
   <div class="controls">
     <button id="toggle-btn">Start Camera</button>
-    <button id="reset-btn" disabled>Scan Again</button>
-    <button id="zoom-2x" style="display: none; background: #475569;">2x</button>
+    <button id="reset-btn" disabled style="background: #059669;">Scan Again</button>
   </div>
 
   <div class="scanner-wrapper">
     <video id="video" autoplay playsinline muted></video>
-    <div class="scan-line" id="scan-line"></div>
+    <div class="viewfinder"></div>
   </div>
 
-  <div class="zoom-slider" id="zoom-container">
-    <span>Zoom:</span>
-    <input type="range" id="zoom-range" min="1" max="5" step="0.1" value="1" style="flex: 1;">
-    <span id="zoom-val">1x</span>
-  </div>
+  <!-- Offscreen canvas used to invert and enhance frames -->
+  <canvas id="proc-canvas" style="display: none;"></canvas>
 
   <div class="card">
-    <span class="status-badge" id="scanner-status">Status: Idle</span>
-    <div><strong>Scanned Data:</strong></div>
-    <div class="result-text" id="result-text">Waiting to scan...</div>
+    <span class="badge" id="status-badge">Status: Idle</span>
+    <div><strong>Decoded Value:</strong></div>
+    <div class="result-text" id="result-text">Waiting...</div>
     <div style="margin-top: 6px; font-size: 0.85rem; color: #94a3b8;">
-      Format: <span id="result-format">-</span> | Engine: <span id="scan-engine">-</span>
+      Mode: <span id="mode-text">Standard + Inverted Auto</span>
     </div>
   </div>
 
@@ -132,82 +125,31 @@
     const video = document.getElementById('video');
     const toggleBtn = document.getElementById('toggle-btn');
     const resetBtn = document.getElementById('reset-btn');
-    const zoom2xBtn = document.getElementById('zoom-2x');
-    const zoomContainer = document.getElementById('zoom-container');
-    const zoomRange = document.getElementById('zoom-range');
-    const zoomVal = document.getElementById('zoom-val');
     const resultText = document.getElementById('result-text');
-    const resultFormat = document.getElementById('result-format');
-    const scanEngine = document.getElementById('scan-engine');
-    const scannerStatus = document.getElementById('scanner-status');
-    const scanLine = document.getElementById('scan-line');
+    const statusBadge = document.getElementById('status-badge');
+    const canvas = document.getElementById('proc-canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
     let stream = null;
     let track = null;
     let scanning = false;
-    let isPaused = false; // Prevents spamming and lets user scan repeatedly
+    let isPaused = false;
+    let frameToggle = false;
     let detector = null;
-    let resetTimer = null;
+    let zxingReader = null;
 
-    const hasNativeBarcode = 'BarcodeDetector' in window;
-    if (hasNativeBarcode) {
-      detector = new BarcodeDetector({
-        formats: ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e']
-      });
-      scanEngine.textContent = 'Hardware Native';
+    if ('BarcodeDetector' in window) {
+      detector = new BarcodeDetector({ formats: ['qr_code', 'ean_13', 'code_128', 'data_matrix'] });
     } else {
-      scanEngine.textContent = 'ZXing Fallback';
+      zxingReader = new ZXing.BrowserMultiFormatReader();
     }
 
-    toggleBtn.addEventListener('click', async () => {
-      if (scanning) {
-        stopCamera();
-      } else {
-        startCamera();
-      }
+    toggleBtn.addEventListener('click', () => {
+      if (scanning) stopCamera();
+      else startCamera();
     });
 
-    // Manual Reset Button
-    resetBtn.addEventListener('click', () => {
-      resumeScanning();
-    });
-
-    function setScannerPaused(paused) {
-      isPaused = paused;
-      if (paused) {
-        scannerStatus.textContent = 'Status: Scanned! (Ready in 2s)';
-        scannerStatus.style.background = '#059669';
-        scanLine.style.opacity = '0.2';
-        resetBtn.disabled = false;
-      } else {
-        scannerStatus.textContent = 'Status: Scanning...';
-        scannerStatus.style.background = '#2563eb';
-        scanLine.style.opacity = '1';
-        resetBtn.disabled = true;
-      }
-    }
-
-    function resumeScanning() {
-      if (resetTimer) clearTimeout(resetTimer);
-      setScannerPaused(false);
-    }
-
-    function onCodeDetected(value, format) {
-      if (isPaused) return;
-
-      // Pause to prevent repeated multi-triggers
-      setScannerPaused(true);
-
-      resultText.textContent = value;
-      resultFormat.textContent = format;
-
-      if (navigator.vibrate) navigator.vibrate(100);
-
-      // Auto-unlock after 2.5 seconds so you can scan the next item
-      resetTimer = setTimeout(() => {
-        resumeScanning();
-      }, 2500);
-    }
+    resetBtn.addEventListener('click', resumeScanning);
 
     async function startCamera() {
       try {
@@ -224,86 +166,104 @@
         await video.play();
 
         track = stream.getVideoTracks()[0];
-        setupHardwareZoom(track);
+        
+        // Auto-apply maximum optical/digital zoom supported (around 1.5x - 2x)
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        if (caps.zoom) {
+          const targetZoom = Math.min(2.0, caps.zoom.max);
+          await track.applyConstraints({ advanced: [{ zoom: targetZoom }] });
+        }
 
         scanning = true;
-        setScannerPaused(false);
+        isPaused = false;
         toggleBtn.textContent = 'Stop Camera';
         toggleBtn.style.background = '#dc2626';
+        statusBadge.textContent = 'Status: Scanning...';
+        statusBadge.style.background = '#2563eb';
 
-        if (hasNativeBarcode) {
-          scanWithNative();
-        } else {
-          scanWithZXingFallback();
-        }
+        requestAnimationFrame(processFrame);
       } catch (err) {
         alert('Camera Error: ' + err.message);
       }
     }
 
-    function setupHardwareZoom(videoTrack) {
-      const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
-      if (capabilities.zoom) {
-        zoomContainer.style.display = 'flex';
-        zoom2xBtn.style.display = 'inline-block';
-        zoomRange.min = capabilities.zoom.min;
-        zoomRange.max = capabilities.zoom.max;
-        zoomRange.step = capabilities.zoom.step || 0.1;
-
-        zoomRange.oninput = () => applyZoom(parseFloat(zoomRange.value));
-        zoom2xBtn.onclick = () => {
-          const target = Math.min(2.0, capabilities.zoom.max);
-          zoomRange.value = target;
-          applyZoom(target);
-        };
-      }
-    }
-
-    function applyZoom(val) {
-      if (!track) return;
-      track.applyConstraints({ advanced: [{ zoom: val }] });
-      zoomVal.textContent = `${val.toFixed(1)}x`;
-    }
-
-    async function scanWithNative() {
+    async function processFrame() {
       if (!scanning) return;
-      if (!isPaused) {
+
+      if (!isPaused && video.readyState === video.HAVE_ENOUGH_DATA) {
+        // Crop directly to center 40% where the reticle box is located
+        const cropW = video.videoWidth * 0.4;
+        const cropH = video.videoWidth * 0.4;
+        const cropX = (video.videoWidth - cropW) / 2;
+        const cropY = (video.videoHeight - cropH) / 2;
+
+        canvas.width = cropW;
+        canvas.height = cropH;
+
+        // Alternate passes: Frame A = Normal, Frame B = Inverted + High Contrast
+        frameToggle = !frameToggle;
+        if (frameToggle) {
+          ctx.filter = 'none';
+        } else {
+          // This inverts white-on-black into black-on-white and sharpens lines
+          ctx.filter = 'invert(100%) contrast(150%)';
+        }
+
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
         try {
-          const barcodes = await detector.detect(video);
-          if (barcodes.length > 0) {
-            onCodeDetected(barcodes[0].rawValue, barcodes[0].format);
+          if (detector) {
+            const barcodes = await detector.detect(canvas);
+            if (barcodes.length > 0) {
+              handleSuccess(barcodes[0].rawValue);
+            }
+          } else if (zxingReader) {
+            // ZXing canvas decode
+            const imgData = ctx.getImageData(0, 0, cropW, cropH);
+            // ZXing software fallback
+            const luminanceSource = new ZXing.RGBLuminanceSource(imgData.data, cropW, cropH);
+            const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
+            const result = new ZXing.MultiFormatReader().decode(binaryBitmap);
+            if (result) handleSuccess(result.getText());
           }
         } catch (e) {
-          // ignore dropped frames
+          // No barcode detected in this specific frame
         }
       }
-      requestAnimationFrame(scanWithNative);
+
+      requestAnimationFrame(processFrame);
     }
 
-    let zxingReader = null;
-    function scanWithZXingFallback() {
-      zxingReader = new ZXing.BrowserMultiFormatReader();
-      zxingReader.decodeFromVideoElement(video, (result) => {
-        if (result && scanning && !isPaused) {
-          onCodeDetected(result.getText(), result.getBarcodeFormat());
-        }
-      });
+    function handleSuccess(val) {
+      isPaused = true;
+      resultText.textContent = val;
+      statusBadge.textContent = 'Status: Scanned!';
+      statusBadge.style.background = '#059669';
+      resetBtn.disabled = false;
+      if (navigator.vibrate) navigator.vibrate(120);
+
+      // Auto-unlock after 3 seconds
+      setTimeout(() => {
+        resumeScanning();
+      }, 3000);
+    }
+
+    function resumeScanning() {
+      isPaused = false;
+      resetBtn.disabled = true;
+      statusBadge.textContent = 'Status: Scanning...';
+      statusBadge.style.background = '#2563eb';
     }
 
     function stopCamera() {
       scanning = false;
-      isPaused = false;
-      if (resetTimer) clearTimeout(resetTimer);
-      if (zxingReader) zxingReader.reset();
       if (stream) stream.getTracks().forEach(t => t.stop());
       video.srcObject = null;
       toggleBtn.textContent = 'Start Camera';
       toggleBtn.style.background = '#2563eb';
       resetBtn.disabled = true;
-      scannerStatus.textContent = 'Status: Idle';
-      scannerStatus.style.background = '#334155';
-      zoomContainer.style.display = 'none';
-      zoom2xBtn.style.display = 'none';
+      statusBadge.textContent = 'Status: Idle';
+      statusBadge.style.background = '#334155';
     }
   </script>
 </body>
